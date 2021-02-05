@@ -1,0 +1,333 @@
+From 7d38e443aa7ea7c4c28d3b8c39143f9901b7454e Mon Sep 17 00:00:00 2001
+From: whc2001 <ianwang0122@outlook.com>
+Date: Sat, 6 Feb 2021 06:52:01 +0800
+Subject: [PATCH] Diff
+
+---
+ .gitignore                                    | 26 +++++++++++++++++
+ .../hal/target/CC2530ZNP/_hal_uart_dma.c      | 13 +++++----
+ .../hal/target/CC2530ZNP/_hal_uart_isr.c      | 28 +++++++++++++++----
+ .../hal/target/CC2530ZNP/hal_board_cfg.h      | 28 +++++++++++--------
+ Components/hal/target/CC2530ZNP/hal_dma.c     |  4 +--
+ Components/hal/target/CC2530ZNP/hal_uart.c    |  1 +
+ Components/mac/high_level/mac_pib.c           |  6 +++-
+ .../srf04/single_chip/mac_radio_defs.c        | 28 ++-----------------
+ 8 files changed, 84 insertions(+), 50 deletions(-)
+ create mode 100644 .gitignore
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..25a8068
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,26 @@
++
++*.hex
++*.ewp
++*.ewd
++*.ewt
++*.ewp
++*.ewd
++*.dep
++*.pbi
++*.xcl
++*.r51
++*.s51
++*.lst
++*.pbd
++*.browse
++*.linf
++*.pbw
++*.map
++*.a51
++*.ewd
++*.ewp
++*.dbgdt
++*.bat
++*.ps1
++*.dnx
++*.wsdt
+diff --git a/Components/hal/target/CC2530ZNP/_hal_uart_dma.c b/Components/hal/target/CC2530ZNP/_hal_uart_dma.c
+index e21ae0d..97a25d2 100644
+--- a/Components/hal/target/CC2530ZNP/_hal_uart_dma.c
++++ b/Components/hal/target/CC2530ZNP/_hal_uart_dma.c
+@@ -332,11 +332,14 @@ static void HalUARTInitDMA(void)
+   P2DIR &= ~P2DIR_PRIPO;
+   P2DIR |= HAL_UART_PRIPO;
+ 
+-#if (HAL_UART_DMA == 1)
+-  PERCFG &= ~HAL_UART_PERCFG_BIT;    // Set UART0 I/O to Alt. 1 location on P0.
+-#else
+-  PERCFG |= HAL_UART_PERCFG_BIT;     // Set UART1 I/O to Alt. 2 location on P1.
+-#endif
++/*** !!!!! ONLY FOR EBYTE E800 !!!!! ***/
++  
++//#if (HAL_UART_DMA == 1)
++//  PERCFG &= ~HAL_UART_PERCFG_BIT;    // Set UART0 I/O to Alt. 1 location on P0.
++//#else
++  PERCFG |= HAL_UART_PERCFG_BIT;     // Set UART0 I/O to Alt. 2 location on P1 (P1.4/P1.5)
++//#endif
++
+   PxSEL  |= HAL_UART_Px_RX_TX;       // Enable Tx and Rx on P1.
+   ADCCFG &= ~HAL_UART_Px_RX_TX;      // Make sure ADC doesnt use this.
+   UxCSR = CSR_MODE;                  // Mode is UART Mode.
+diff --git a/Components/hal/target/CC2530ZNP/_hal_uart_isr.c b/Components/hal/target/CC2530ZNP/_hal_uart_isr.c
+index a29dfd7..4899436 100644
+--- a/Components/hal/target/CC2530ZNP/_hal_uart_isr.c
++++ b/Components/hal/target/CC2530ZNP/_hal_uart_isr.c
+@@ -210,6 +210,7 @@ typedef struct
+  */
+ 
+ static uartISRCfg_t isrCfg;
++static uint8 isSending; // Add: for signalling if whole packet is finished
+ 
+ /*********************************************************************
+  * LOCAL FUNCTIONS
+@@ -240,11 +241,11 @@ static void HalUARTInitISR(void)
+   P2DIR &= ~P2DIR_PRIPO;
+   P2DIR |= HAL_UART_PRIPO;
+ 
+-#if (HAL_UART_ISR == 1)
+-  PERCFG &= ~HAL_UART_PERCFG_BIT;    // Set UART0 I/O location to P0.
+-#else
++//#if (HAL_UART_ISR == 1)
++  //PERCFG &= ~HAL_UART_PERCFG_BIT;    // Set UART0 I/O location to P0.
++//#else
+   PERCFG |= HAL_UART_PERCFG_BIT;     // Set UART1 I/O location to P1.
+-#endif
++//#endif
+   PxSEL  |= HAL_UART_Px_RX_TX;       // Enable Tx and Rx on P1.
+   ADCCFG &= ~HAL_UART_Px_RX_TX;      // Make sure ADC doesnt use this.
+   UxCSR = CSR_MODE;                  // Mode is UART Mode.
+@@ -377,7 +378,12 @@ uint16 HalUARTWriteISR(uint8 *buf, uint16 len)
+   {
+     return 0;
+   }
+-
++  
++  U1CSR &= ~0x40;     // Add: Disable RX
++  P1_3 = 1;     // Add: 485 Transmitting mode (RUN_LED = 1)
++  isSending = 1;        // Add: Set sending flag
++  MicroWait(6000);      // Add: Wait for some time
++  
+   for (cnt = 0; cnt < len; cnt++)
+   {
+     isrCfg.txBuf[isrCfg.txTail] = *buf++;
+@@ -395,6 +401,8 @@ uint16 HalUARTWriteISR(uint8 *buf, uint16 len)
+     // Keep re-enabling ISR as it might be keeping up with this loop due to other ints.
+     IEN2 |= UTXxIE;  
+   }
++  
++  isSending = 0;        // Add: Clear sending flag
+ 
+   return cnt;
+ }
+@@ -570,9 +578,19 @@ HAL_ISR_FUNCTION( halUart1TxIsr, UTX1_VECTOR )
+   {
+     IEN2 &= ~UTXxIE;
+     isrCfg.txMT = 1;
++    
++    if(!isSending)      // Only after HalUARTWriteISR() finished writing
++    {
++      MicroWait(6000);    // Add: Wait for some time
++      U1CSR |= 0x40;      // Add: Enable RX
++      P1_3 = 0;   // Add: 485 Receive mode (RUN_LED = 0)
++    }
+   }
+   else
+   {
++    U1CSR &= ~0x40;     // Add: Keep RX disabled
++    P1_3 = 1;     // Add: Keep 485 in transmitting mode (RUN_LED = 1)
++
+     UTXxIF = 0;
+     UxDBUF = isrCfg.txBuf[isrCfg.txHead++];
+ 
+diff --git a/Components/hal/target/CC2530ZNP/hal_board_cfg.h b/Components/hal/target/CC2530ZNP/hal_board_cfg.h
+index 992045d..2e01f44 100644
+--- a/Components/hal/target/CC2530ZNP/hal_board_cfg.h
++++ b/Components/hal/target/CC2530ZNP/hal_board_cfg.h
+@@ -59,7 +59,7 @@
+  *                        Note that only one of them can be defined
+  * ------------------------------------------------------------------------------------------------
+  */
+-#define xHAL_PA_LNA
++#define HAL_PA_LNA
+ #define xHAL_PA_LNA_CC2590
+ 
+ 
+@@ -112,10 +112,10 @@ extern unsigned char znpCfg0;
+ #define HAL_LED_BLINK_DELAY()   st( { volatile uint32 i; for (i=0; i<0x5800; i++) { }; } )
+ 
+ /* 1 - Green */
+-#define LED1_BV           BV(0)
+-#define LED1_SBIT         P1_0
++#define LED1_BV           BV(2)
++#define LED1_SBIT         P1_2
+ #define LED1_DDR          P1DIR
+-#define LED1_POLARITY     ACTIVE_HIGH
++#define LED1_POLARITY     ACTIVE_LOW
+ 
+ #if defined (HAL_BOARD_CC2530EB_REV17)
+   /* 2 - Red */
+@@ -235,8 +235,8 @@ extern unsigned char znpCfg0;
+ #define ACTIVE_HIGH       !!    /* double negation forces result to be '1' */
+ 
+ /* S1 */
+-#define PUSH1_BV          BV(1)
+-#define PUSH1_SBIT        P0_1
++#define PUSH1_BV          BV(7)
++#define PUSH1_SBIT        P1_7
+ 
+ #if defined (HAL_BOARD_CC2530EB_REV17)
+   #define PUSH1_POLARITY    ACTIVE_HIGH
+@@ -314,7 +314,7 @@ extern unsigned char znpCfg0;
+  */
+ 
+ /* ----------- RF-frontend Connection Initialization ---------- */
+-#if defined HAL_PA_LNA || defined HAL_PA_LNA_CC2590
++#if defined HAL_PA_LNA || defined HAL_PA_LNA_CC2590 || defined HAL_PA_LNA_CC2592
+ extern void MAC_RfFrontendSetup(void);
+ #define HAL_BOARD_RF_FRONTEND_SETUP() MAC_RfFrontendSetup()
+ #else
+@@ -343,7 +343,7 @@ extern void MAC_RfFrontendSetup(void);
+ #endif
+ 
+ /* ----------- Board Initialization ---------- */
+-#if defined (HAL_BOARD_CC2530EB_REV17) && !defined (HAL_PA_LNA) && !defined (HAL_PA_LNA_CC2590)
++#if defined (HAL_BOARD_CC2530EB_REV17) && !defined (HAL_PA_LNA) && !defined (HAL_PA_LNA_CC2590) && !defined (HAL_PA_LNA_CC2592)
+ 
+ #define HAL_BOARD_INIT() st                                      \
+ (                                                                \
+@@ -362,7 +362,7 @@ extern void MAC_RfFrontendSetup(void);
+   PREFETCH_ENABLE();                                             \
+ )
+ 
+-#elif defined (HAL_BOARD_CC2530EB_REV13) || defined (HAL_PA_LNA) || defined (HAL_PA_LNA_CC2590)
++#elif defined (HAL_BOARD_CC2530EB_REV13) || defined (HAL_PA_LNA) || defined (HAL_PA_LNA_CC2590)|| defined (HAL_PA_LNA_CC2592)
+ 
+ #ifdef HAL_ENABLE_WIFI_COEX_PINS
+ #define HAL_BOARD_ENABLE_WIFI_COEX_PINS() st                                      \
+@@ -405,6 +405,7 @@ extern void MAC_RfFrontendSetup(void);
+                                                                  \
+   /* set direction for GPIO outputs  */                          \
+   LED1_DDR |= LED1_BV;                                           \
++  HAL_TURN_OFF_LED1();  /* Add: Not using NWK_LED */             \
+                                                                  \
+   /* Set PA/LNA HGM control P0_7 */                              \
+   P0DIR |= BV(7);                                                \
+@@ -416,6 +417,11 @@ extern void MAC_RfFrontendSetup(void);
+   /* configure tristates */                                      \
+   P0INP |= PUSH2_BV;                                             \
+                                                                  \
++  /* Add: RS485 direction pin P1.3 setup */                      \
++  P1SEL &= ~0x08;       /* Add: P1.3 manually control */         \
++  P1DIR |= 0x08;        /* Add: P1.3 output */                   \
++  P1_3 = 0;             /* Add: P1.3 default low (receive) */    \
++                                                                 \
+   /* setup RF frontend if necessary */                           \
+   HAL_BOARD_RF_FRONTEND_SETUP();                                 \
+ )
+@@ -591,8 +597,8 @@ st( \
+ #define HAL_UART_DMA  0
+ #define HAL_UART_ISR  1
+ #else
+-#define HAL_UART_DMA  1
+-#define HAL_UART_ISR  0
++#define HAL_UART_DMA  0
++#define HAL_UART_ISR  1
+ #endif
+ #define HAL_UART_USB  0
+ 
+diff --git a/Components/hal/target/CC2530ZNP/hal_dma.c b/Components/hal/target/CC2530ZNP/hal_dma.c
+index d792a40..8deb855 100644
+--- a/Components/hal/target/CC2530ZNP/hal_dma.c
++++ b/Components/hal/target/CC2530ZNP/hal_dma.c
+@@ -124,8 +124,8 @@ HAL_ISR_FUNCTION( halDmaIsr, DMA_VECTOR )
+   {
+     if (HAL_DMA_CHECK_IRQ(HAL_DMA_CH_TX))
+     {
+-      extern void HalUARTIsrDMA(void);
+-      HalUARTIsrDMA();
++      //extern void HalUARTIsrDMA(void);        // <--Comment!!!
++      //HalUARTIsrDMA();        // <--Comment!!!
+     }
+   }
+ #if (defined HAL_SPI) && (HAL_SPI == TRUE)
+diff --git a/Components/hal/target/CC2530ZNP/hal_uart.c b/Components/hal/target/CC2530ZNP/hal_uart.c
+index 8119718..ecc5a28 100644
+--- a/Components/hal/target/CC2530ZNP/hal_uart.c
++++ b/Components/hal/target/CC2530ZNP/hal_uart.c
+@@ -45,6 +45,7 @@
+ #include "hal_defs.h"
+ #include "hal_types.h"
+ #include "hal_uart.h"
++#include "OnBoard.h"    // Add this line for MicroWait()
+ 
+ /*********************************************************************
+  * MACROS
+diff --git a/Components/mac/high_level/mac_pib.c b/Components/mac/high_level/mac_pib.c
+index aaaaf6a..7fc93aa 100644
+--- a/Components/mac/high_level/mac_pib.c
++++ b/Components/mac/high_level/mac_pib.c
+@@ -133,7 +133,11 @@ static CODE const macPib_t macPibDefaults =
+   FALSE,                                      /* securityEnabled */
+ 
+   /* Proprietary */
+-  0,                                          /* phyTransmitPower */
++#if defined (HAL_PA_LNA)
++  27,                                          /* phyTransmitPower */
++#else
++  0,
++#endif
+   MAC_CHAN_11,                                /* logicalChannel */
+   {0, SADDR_MODE_EXT},                        /* extendedAddress */
+   1,                                          /* altBe */
+diff --git a/Components/mac/low_level/srf04/single_chip/mac_radio_defs.c b/Components/mac/low_level/srf04/single_chip/mac_radio_defs.c
+index 15058db..5f30e1e 100644
+--- a/Components/mac/low_level/srf04/single_chip/mac_radio_defs.c
++++ b/Components/mac/low_level/srf04/single_chip/mac_radio_defs.c
+@@ -542,20 +542,7 @@ MAC_INTERNAL_API void macRadioTurnOnPower(void)
+     * Note that The register values are not retained during sleep.
+     */
+     
+-    if (paLnaChip == PA_LNA_SE2431L)
+-    {
+-      /* CPS or P0_7 maps closely to the HGM line */
+-      HAL_PA_LNA_RX_HGM(); 
+-  
+-      /* EN or CSD line is controlled via software so setting it high here to start the SE2431L frontend */
+-      HAL_PA_LNA_RX_CSD_HIGH();
+-      
+-      /* CTX or P1_1 maps closely to PAEN */
+-      RFC_OBS_CTRL0 = RFC_OBS_CTRL_PA_PD_INV;
+-      OBSSEL1       = OBSSEL_OBS_CTRL0;
+-    }
+-    else if(paLnaChip == PA_LNA_CC2592)
+-    {
++    /*** !!!!! ONLY FOR EBYTE E18-2G4Z27SI !!!!! ***/
+       /* P1_1 -> PAEN */
+       RFC_OBS_CTRL0 = RFC_OBS_CTRL_PA_PD_INV;
+       OBSSEL1       = OBSSEL_OBS_CTRL0;
+@@ -563,18 +550,7 @@ MAC_INTERNAL_API void macRadioTurnOnPower(void)
+       /* P1_0 -> EN (LNA control) */
+       RFC_OBS_CTRL1 = RFC_OBS_CTRL_LNAMIX_PD_INV;
+       OBSSEL0       = OBSSEL_OBS_CTRL1;
+-    }  
+-    else 
+-    {   
+-      /* P1_1 -> PAEN */
+-      RFC_OBS_CTRL0 = RFC_OBS_CTRL_PA_PD_INV;
+-      OBSSEL1       = OBSSEL_OBS_CTRL0;
+-      
+-      /* P1_4 -> EN (LNA control) */
+-      RFC_OBS_CTRL1 = RFC_OBS_CTRL_LNAMIX_PD_INV;
+-      OBSSEL4       = OBSSEL_OBS_CTRL1;
+-    }
+-    
++
+     /* For any RX, change CCA settings for CC2591 compression workaround.
+     * This will override LNA control if CC2591_COMPRESSION_WORKAROUND
+     * flag is defined.
+-- 
+2.29.0.windows.1
+
